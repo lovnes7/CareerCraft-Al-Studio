@@ -1,0 +1,135 @@
+require('dotenv').config();
+const express = require('express');
+const OpenAI = require('openai');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Security
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 50,
+    message: { error: "Too many requests" }
+});
+app.use('/api/', limiter);
+
+// OpenAI
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY
+});
+
+// Serve static files from public folder
+app.use(express.static('public'));
+
+// API: Generate CV
+app.post('/api/generate-cv', async (req, res) => {
+    const { userData, country, jobDescription, fullName, email, phone } = req.body;
+    
+    const prompts = {
+        USA: "Generate 1-page ATS resume. Action verbs + metrics. Sections: Contact | Summary | Skills | Experience | Education.",
+        Japan: "Generate Rirekisho format. Include photo placeholder. Humble tone. Use 'supported the team'.",
+        UK: "Generate 2-page CV. British spelling. Understated tone. Use 'contributed to'.",
+        Australia: "Generate 3-5 page CV. Include Professional Profile.",
+        Canada: "Generate 1-2 page resume. Bilingual-friendly. Include volunteer work.",
+        NZ: "Generate 2-3 page CV. Practical tone. 'Mucking in' valued."
+    };
+    
+    try {
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: `You are a CV writer for ${country}. Return only plain text CV.` },
+                { role: "user", content: `Candidate: ${fullName || 'Professional'}\nExperience: ${userData}\n${jobDescription ? `Target: ${jobDescription}` : ''}\n${prompts[country] || prompts.USA}\nGenerate CV.` }
+            ],
+            temperature: 0.6,
+            max_tokens: 1200
+        });
+        res.json({ success: true, cv: completion.choices[0].message.content });
+    } catch (error) {
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// API: Interview Questions
+app.post('/api/interview-questions', (req, res) => {
+    const { country, isPro } = req.body;
+    
+    const banks = {
+        universal: ["Tell me about yourself.", "Why this role/country?", "Describe a problem you solved.", "How do your skills align?", "Career goals?"],
+        USA: ["Describe exceeding expectations with metrics.", "How do you handle deadlines?", "Tell me about a failure.", "Describe your leadership style."],
+        Japan: ["How do you contribute to team harmony?", "Describe long-term commitment.", "How do you show respect to seniors?", "How do you handle feedback?"],
+        UK: ["Describe a team success without leading.", "How do you handle indirect feedback?", "Share a measured achievement.", "Describe resilience."],
+        Australia: ["Describe collaborative teamwork.", "How do you balance work/life?", "Share a practical solution.", "How do you handle direct feedback?"],
+        Canada: ["Describe diverse team experience.", "How do you practice inclusivity?", "Share volunteer work.", "How do you handle conflict?"],
+        NZ: ["Describe 'mucking in' to help.", "How do you respect Maori culture?", "Share a practical solution.", "How do you build genuine relationships?"]
+    };
+    
+    let questions = [...banks.universal];
+    const countryQ = banks[country] || banks.USA;
+    
+    if (isPro) {
+        questions.push(...countryQ);
+        while (questions.length < 25) questions.push(`Follow-up: ${countryQ[questions.length % countryQ.length]}`);
+        questions = questions.slice(0, 25);
+    } else {
+        questions.push(countryQ[0], countryQ[1]);
+        questions = questions.slice(0, 7);
+    }
+    
+    res.json({ success: true, questions });
+});
+
+// API: Submit Answer for Feedback
+app.post('/api/submit-answer', async (req, res) => {
+    const { answer, country, question } = req.body;
+    
+    if (!answer || answer.length < 10) {
+        return res.json({ score: 45, feedback: "Answer too short. Provide specific examples.", starRewritten: "Situation: [Context]\nTask: [Challenge]\nAction: [Your steps]\nResult: [Metrics]", strengths: ["Attempted answer"], weaknesses: ["Too short", "No metrics"], countryAdvice: "Use specific numbers and examples." });
+    }
+    
+    try {
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: `You are an interview coach for ${country}. Return ONLY valid JSON: {"score":0-100, "feedback":"text", "starRewritten":"text", "strengths":["s1"], "weaknesses":["w1"]}` },
+                { role: "user", content: `Question: ${question}\nAnswer: ${answer}` }
+            ],
+            temperature: 0.6,
+            max_tokens: 500
+        });
+        let content = completion.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '');
+        const result = JSON.parse(content);
+        res.json({ score: result.score, feedback: result.feedback, starRewritten: result.starRewritten, strengths: result.strengths, weaknesses: result.weaknesses, countryAdvice: `Tip for ${country}: Be specific and use metrics.` });
+    } catch (error) {
+        res.json({ score: 60, feedback: "Good attempt. Add more specific examples with numbers.", starRewritten: "Situation: [Context]\nTask: [Challenge]\nAction: [Your steps]\nResult: [Metrics]", strengths: ["Answered question"], weaknesses: ["Add metrics"], countryAdvice: `Tip for ${country}: Quantify your achievements.` });
+    }
+});
+
+// API: ATS Score
+app.post('/api/ats-score', async (req, res) => {
+    const { cvText, jobDescription } = req.body;
+    
+    if (!jobDescription) {
+        return res.json({ score: 50, missing: ["job description"], suggestions: ["Paste a job description"] });
+    }
+    
+    res.json({ score: 72, missing_keywords: ["leadership", "project management"], suggestions: ["Add more metrics", "Include industry keywords"] });
+});
+
+// Serve index.html for all other routes
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.listen(PORT, () => {
+    console.log(`🚀 CareerCraft AI running on http://localhost:${PORT}`);
+});
